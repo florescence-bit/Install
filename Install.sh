@@ -2,176 +2,136 @@
 set -e
 
 # --- CONFIGURATION ---
-DISK="/dev/nvme0n1"
+DISK="/dev/nvme0n1" # CHECK YOUR DISK NAME: Use 'lsblk' to verify this before running!
 SUMMARY="/root/installation-summary.txt"
+USERNAME="san"
+PASSWORD="san" 
+TIMEZONE="Asia/Kolkata" # Delhi, India Timezone
+HOSTNAME="hp-arch" # Updated hostname for context
 
 # --- START ---
 echo "=== Arch Linux Installation Summary ===" > $SUMMARY
 echo "Start Time: $(date)" >> $SUMMARY
+echo "Disk: $DISK" >> $SUMMARY
+echo "Hardware Profile: HP Pavilion 14s (Intel)" >> $SUMMARY
+echo "Timezone: $TIMEZONE" >> $SUMMARY
 
 echo ">>> Partitioning Disk ($DISK)"
-# Wipes the disk and creates partitions
+# Wipes the disk and creates partitions:
 # p1: EFI (500M), p2: Root (150G), p3: Home (Remaining)
 {
 sgdisk -Z $DISK
 sgdisk -n 1:0:+500M -t 1:ef00 $DISK
 sgdisk -n 2:0:+150G -t 2:8300 $DISK
 sgdisk -n 3:0:0     -t 3:8300 $DISK
-} >> $SUMMARY
+} >> $SUMMARY 2>&1
 
 echo ">>> Formatting Partitions"
 {
 mkfs.vfat -F32 ${DISK}p1
 mkfs.ext4 ${DISK}p2
 mkfs.ext4 ${DISK}p3
-} >> $SUMMARY
+} >> $SUMMARY 2>&1
 
 echo ">>> Mounting File Systems"
-# NOTE: Mounting EFI to /boot is the standard for systemd-boot
-# so it can find the kernel images automatically.
 {
 mount ${DISK}p2 /mnt
 mkdir -p /mnt/boot
 mkdir -p /mnt/home
-mount ${DISK}p1 /mnt/boot
+mount ${DISK}p1 /mnt/boot/efi # Standard location for GRUB EFI
 mount ${DISK}p3 /mnt/home
 } >> $SUMMARY
 
-echo ">>> Installing Base System"
-pacstrap /mnt base linux linux-firmware intel-ucode networkmanager sudo nano git pipewire pipewire-alsa pipewire-pulse pipewire-jack >> $SUMMARY
+echo ">>> Installing Base System & GNOME Components"
+# Includes Intel microcode, GRUB, and MESA for graphics on HP
+pacstrap /mnt base linux linux-firmware intel-ucode networkmanager sudo nano git \
+pipewire pipewire-alsa pipewire-pulse pipewire-jack grub efibootmgr mesa >> $SUMMARY 2>&1
 
 echo ">>> Generating fstab"
 genfstab -U /mnt >> /mnt/etc/fstab
 
-echo ">>> Entering Chroot"
-# IMPORTANT: We use unquoted EOF so we can escape variables manually
+echo ">>> Entering Chroot for System Configuration"
 arch-chroot /mnt /bin/bash << EOF
 
 SUMMARY="/root/installation-summary.txt"
+USERNAME="$USERNAME"
+PASSWORD="$PASSWORD"
 
 echo ">>> Setting timezone" >> \$SUMMARY
-ln -sf /usr/share/zoneinfo/Asia/Kolkata /etc/localtime
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
 hwclock --systohc
 
 echo ">>> Locale setup" >> \$SUMMARY
 sed -i 's/#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
 locale-gen
 echo "LANG=en_US.UTF-8" > /etc/locale.conf
-
-# Fixes the vconsole error from your screenshot
 echo "KEYMAP=us" > /etc/vconsole.conf
 
 echo ">>> Hostname setup" >> \$SUMMARY
-echo "arch" > /etc/hostname
+echo "$HOSTNAME" > /etc/hostname
 
 echo ">>> NetworkManager enabled" >> \$SUMMARY
 systemctl enable NetworkManager
 
-echo ">>> Creating user 'san'" >> \$SUMMARY
-useradd -m -G wheel san
-echo "san:san" | chpasswd
+echo ">>> Creating user '$USERNAME'" >> \$SUMMARY
+useradd -m -G wheel \$USERNAME
+echo "\$USERNAME:\$PASSWORD" | chpasswd # Sets password 'san' for user 'san'
 # Allow sudo for wheel group
 sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
-echo ">>> Installing GNOME + Extensions" >> \$SUMMARY
+echo ">>> Installing GNOME, Extensions, and GDM" >> \$SUMMARY
 pacman --noconfirm -S gnome gnome-tweaks gnome-shell-extensions \
-bluez bluez-utils xorg-xwayland
+bluez bluez-utils xorg-xwayland >> \$SUMMARY 2>&1
 
 systemctl enable gdm
 
-echo ">>> Installing systemd-boot" >> \$SUMMARY
-bootctl install
+echo ">>> Installing and Configuring GRUB" >> \$SUMMARY
+# Install GRUB to the EFI partition
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB >> \$SUMMARY 2>&1
+# Generate the GRUB configuration file
+grub-mkconfig -o /boot/grub/grub.cfg >> \$SUMMARY 2>&1
 
-# Capture UUID for the root partition
-ROOT_UUID=\$(blkid -s UUID -o value ${DISK}p2)
+echo ">>> Installing macOS (WhiteSur) Theme" >> \$SUMMARY
+# Set up necessary dependencies for theme installation
+pacman --noconfirm -S gnome-shell-extensions sassc optipng inkscape >> \$SUMMARY 2>&1
 
-# Create Loader Entry
-cat << BOOTCONF > /boot/loader/entries/arch.conf
-title   Arch Linux
-linux   /vmlinuz-linux
-initrd  /intel-ucode.img
-initrd  /initramfs-linux.img
-options root=UUID=\$ROOT_UUID rw
-BOOTCONF
+# Switch to the new user's home directory to clone and install themes
+cd /home/\$USERNAME
 
-# Set Default Loader
-echo "default arch" > /boot/loader/loader.conf
-echo "timeout 3" >> /boot/loader/loader.conf
-
-echo ">>> Preparing macOS theme autoinstall" >> \$SUMMARY
-mkdir -p /home/san/.config/autostart
-
-# Create the install script that runs on first login
-cat << THEMESCRIPT > /home/san/install-theme.sh
-#!/bin/bash
-cd ~
+# Clone themes
 git clone https://github.com/vinceliuice/WhiteSur-gtk-theme.git
 git clone https://github.com/vinceliuice/WhiteSur-icon-theme.git
 git clone https://github.com/vinceliuice/WhiteSur-cursors.git
 
+# Install GTK Theme (using dark for a modern macOS look)
 cd WhiteSur-gtk-theme
-./install.sh --theme blue --icon blue --normal --round
+./install.sh -t all -c dark -n all -i arch -s 220 >> \$SUMMARY 2>&1
 
+# Install Icon Theme
 cd ../WhiteSur-icon-theme
-./install.sh
+./install.sh -t default -s 220 >> \$SUMMARY 2>&1
 
+# Install Cursor Theme
 cd ../WhiteSur-cursors
-sudo ./install.sh
+sudo ./install.sh >> \$SUMMARY 2>&1
 
-gsettings set org.gnome.desktop.interface gtk-theme "WhiteSur-light-blue"
-gsettings set org.gnome.desktop.interface icon-theme "WhiteSur"
-gsettings set org.gnome.desktop.interface cursor-theme "WhiteSur-cursors"
-
-# Self-destruct this script after running
-rm -f ~/install-theme.sh
-rm -f ~/.config/autostart/theme.desktop
-THEMESCRIPT
-
-chmod +x /home/san/install-theme.sh
-chown san:san /home/san/install-theme.sh
-
-# Create Autostart entry
-cat << AUTOSTART > /home/san/.config/autostart/theme.desktop
-[Desktop Entry]
-Type=Application
-Exec=/home/san/install-theme.sh
-X-GNOME-Autostart-enabled=true
-Name=Theme Installer
-AUTOSTART
-
-chown san:san /home/san/.config/autostart/theme.desktop
+# Apply the theme settings for the new user 'san'
+sudo -u \$USERNAME sh -c "
+gsettings set org.gnome.desktop.interface gtk-theme 'WhiteSur-Dark'
+gsettings set org.gnome.desktop.interface icon-theme 'WhiteSur'
+gsettings set org.gnome.desktop.interface cursor-theme 'WhiteSur-cursors'
+gsettings set org.gnome.shell.extensions.user-theme name 'WhiteSur-Dark'
+" >> \$SUMMARY 2>&1
 
 echo ">>> Chroot Configuration Done" >> \$SUMMARY
 EOF
 
 echo "End Time: $(date)" >> $SUMMARY
-echo ">>> INSTALLATION COMPLETE"
-echo ">>> You can now type 'reboot'"
+echo ">>> INSTALLATION COMPLETE — Summary saved to /mnt/root/installation-summary.txt"
+echo ">>> Unmounting filesystems..."
 
-gsettings set org.gnome.desktop.interface gtk-theme "WhiteSur-light-blue"
-gsettings set org.gnome.desktop.interface icon-theme "WhiteSur"
-gsettings set org.gnome.desktop.interface cursor-theme "WhiteSur-cursors"
+# Clean up mounts
+umount -R /mnt
+echo ">>> Filesystems unmounted."
 
-rm -f ~/install-theme.sh
-rm -f ~/.config/autostart/theme.desktop
-THEMESCRIPT
-
-chmod +x /home/san/install-theme.sh
-chown san:san /home/san/install-theme.sh
-
-cat << AUTOSTART > /home/san/.config/autostart/theme.desktop
-[Desktop Entry]
-Type=Application
-Exec=/home/san/install-theme.sh
-X-GNOME-Autostart-enabled=true
-Name=Theme Installer
-AUTOSTART
-
-chown san:san /home/san/.config/autostart/theme.desktop
-
-echo ">>> Chroot Configuration Done" >> \$SUMMARY
-EOF
-
-echo "End Time: $(date)" >> $SUMMARY
-echo ">>> INSTALLATION COMPLETE — Summary saved to /root/installation-summary.txt"
-echo ">>> REBOOT NOW"
+echo ">>> REBOOT NOW (type 'reboot')"
